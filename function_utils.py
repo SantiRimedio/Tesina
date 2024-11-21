@@ -2,7 +2,7 @@ import xarray as xr
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
-from typing import Tuple, Union, Optional
+from typing import Dict, Union, List, Tuple
 from pathlib import Path
 
 def compare_dw_maps(
@@ -292,66 +292,334 @@ def initialize_gee(project_id: str, opt_url: str = 'https://earthengine-highvolu
     ee.Authenticate()
     ee.Initialize(project=project_id, opt_url=opt_url)
 
-def process_dynamic_world(
-        aoi: ee.Geometry,
-        processing_type: Literal['mode', 'mode_pooled', 'mean_pooled', 'mean_unpooled'],
-        output_path: str,
-        scale: int = 30,
-        start_date: str = "2020-01-01",
-        end_date: str = "2021-01-01"
-) -> None:
-    """
-    Process Dynamic World imagery with specified parameters
+
+import ee
+from typing import List
+import numpy as np
+from time import sleep
+
+def chunk_geometry(geometry: ee.Geometry, initial_max_size: int = 15000000, min_chunk_size: int = 1000000) -> List[ee.Geometry]:
+    """Split geometry into smaller chunks with adaptive size reduction on memory errors.
 
     Args:
-        aoi: Area of interest geometry
-        processing_type: Type of processing to apply
-        output_path: Where to save the output NetCDF
-        scale: Resolution in meters
-        start_date: Start date for imagery
-        end_date: End date for imagery
+        geometry: Earth Engine geometry to split
+        initial_max_size: Initial maximum chunk size in bytes
+        min_chunk_size: Minimum chunk size to try before giving up
+
+    Returns:
+        List of geometry chunks
+
+    Raises:
+        RuntimeError: If chunking fails even at minimum chunk size
     """
+    def try_chunking(max_size: int) -> List[ee.Geometry]:
+        bounds = geometry.bounds().getInfo()['coordinates'][0]
+        x_min, y_min = bounds[0][0], bounds[0][1]
+        x_max, y_max = bounds[2][0], bounds[2][1]
+
+        total_area = abs((x_max - x_min) * (y_max - y_min))
+        n_chunks = int(np.ceil(total_area * (50331648 / max_size)))
+
+        n_rows = int(np.ceil(np.sqrt(n_chunks)))
+        n_cols = n_rows
+
+        x_steps = np.linspace(x_min, x_max, n_cols + 1)
+        y_steps = np.linspace(y_min, y_max, n_rows + 1)
+
+        chunks = []
+        for i in range(n_rows):
+            for j in range(n_cols):
+                chunk = ee.Geometry.Rectangle([
+                    x_steps[j], y_steps[i],
+                    x_steps[j+1], y_steps[i+1]
+                ])
+                intersection = chunk.intersection(geometry)
+                if intersection.area().getInfo() > 0:
+                    chunks.append(intersection)
+        return chunks
+
+    current_max_size = initial_max_size
+    while current_max_size >= min_chunk_size:
+        try:
+            return try_chunking(current_max_size)
+        except ee.EEException as e:
+            if "Total request size" in str(e):
+                current_max_size = int(current_max_size * 0.5)  # Reduce chunk size by half
+                sleep(1)  # Add small delay to avoid rate limiting
+                continue
+            raise  # Re-raise if it's a different type of EEException
+
+    raise RuntimeError(f"Failed to chunk geometry even with minimum chunk size of {min_chunk_size} bytes")
+
+def process_worldcover(aoi: ee.Geometry, output_path: str, scale: int = 30) -> None:
+    try:
+        worldcover = ee.ImageCollection("ESA/WorldCover/v100").first()
+        worldcover_clipped = worldcover.clip(aoi)
+        ds = worldcover_clipped.wx.to_xarray(region=ee.Feature(aoi).geometry(), scale=scale)
+
+    except ee.ee_exception.EEException as e:
+        if "Total request size" in str(e):
+            print("Area too large, processing in chunks...")
+            chunks = chunk_geometry(aoi)
+
+            worldcover = ee.ImageCollection("ESA/WorldCover/v100").first()
+            worldcover_clipped = worldcover.clip(chunks[0])
+            ds = worldcover_clipped.wx.to_xarray(region=ee.Feature(chunks[0]).geometry(), scale=scale)
+
+            for i, chunk in enumerate(chunks[1:], 1):
+                print(f"Processing chunk {i+1}/{len(chunks)}...")
+                worldcover_clipped = worldcover.clip(chunk)
+                chunk_ds = worldcover_clipped.wx.to_xarray(
+                    region=ee.Feature(chunk).geometry(),
+                    scale=scale
+                )
+                ds = xr.merge([ds, chunk_ds])
+        else:
+            raise e
+
+    ds = ds.fillna(-1)
+    ds = ds.clip(min=-128, max=127)
+    ds["Map"] = ds["Map"].astype("int8")
+    ds["x"] = ds["x"].astype("float32")
+    ds["y"] = ds["y"].astype("float32")
+
+    ds.to_netcdf(output_path)
+
+
+def chunk_geometry_adaptive(geometry: ee.Geometry, initial_max_size: int = 5000000, min_chunk_size: int = 500000) -> List[ee.Geometry]:
+    """Split geometry with aggressive initial chunking and adaptive resizing."""
+    def try_chunking(max_size: int) -> List[ee.Geometry]:
+        bounds = geometry.bounds().getInfo()['coordinates'][0]
+        x_min, y_min = bounds[0][0], bounds[0][1]
+        x_max, y_max = bounds[2][0], bounds[2][1]
+
+        total_area = abs((x_max - x_min) * (y_max - y_min))
+        n_chunks = int(np.ceil(total_area * (50331648 / max_size)))
+
+        # Use more chunks initially to prevent memory issues
+        n_rows = int(np.ceil(np.sqrt(n_chunks * 1.5)))
+        n_cols = n_rows
+
+        x_steps = np.linspace(x_min, x_max, n_cols + 1)
+        y_steps = np.linspace(y_min, y_max, n_rows + 1)
+
+        chunks = []
+        for i in range(n_rows):
+            for j in range(n_cols):
+                chunk = ee.Geometry.Rectangle([
+                    x_steps[j], y_steps[i],
+                    x_steps[j+1], y_steps[i+1]
+                ])
+                intersection = chunk.intersection(geometry)
+                if intersection.area().getInfo() > 0:
+                    chunks.append(intersection)
+        return chunks
+
+    current_max_size = initial_max_size
+    last_error = None
+
+    while current_max_size >= min_chunk_size:
+        try:
+            chunks = try_chunking(current_max_size)
+            # Validate first chunk with a small computation
+            test_img = ee.Image(1).clip(chunks[0])
+            _ = test_img.getDownloadURL({'scale': 10, 'region': chunks[0].getInfo()})
+            return chunks
+        except ee.EEException as e:
+            if "Total request size" in str(e):
+                current_max_size = int(current_max_size * 0.4)  # More aggressive reduction
+                last_error = e
+                sleep(1)
+                continue
+            raise
+
+    raise RuntimeError(f"Failed to chunk geometry. Last error: {str(last_error)}")
+
+def process_dynamic_world_chunk(
+        chunk: ee.Geometry,
+        processing_type: str,
+        scale: int,
+        start_date: str,
+        end_date: str,
+        retry_count: int = 3
+) -> Optional[xr.Dataset]:
+    """Process a single chunk with retries."""
     CLASS_NAMES = ['water', 'trees', 'grass', 'flooded_vegetation', 'crops',
                    'shrub_and_scrub', 'built', 'bare', 'snow_and_ice']
     CLASS_NUMBER = ee.List.sequence(0, 8)
 
-    dw_filtered = wxee.TimeSeries("GOOGLE/DYNAMICWORLD/V1") \
-        .filterDate(start_date, end_date) \
-        .filterBounds(aoi) \
-        .map(lambda img: img.clip(aoi))
+    for attempt in range(retry_count):
+        try:
+            dw_chunk = wxee.TimeSeries("GOOGLE/DYNAMICWORLD/V1") \
+                .filterDate(start_date, end_date) \
+                .filterBounds(chunk) \
+                .map(lambda img: img.clip(chunk))
 
-    if processing_type == 'mode':
-        ts = dw_filtered.select("label").aggregate_time("year", ee.Reducer.mode())
+            if processing_type == 'mode':
+                ts = dw_chunk.select("label").aggregate_time("year", ee.Reducer.mode())
+            elif processing_type in ['mode_pooled', 'mean_pooled']:
+                reducer = ee.Reducer.mode() if processing_type == 'mode_pooled' else ee.Reducer.mean()
+                ts = dw_chunk.select("label" if processing_type == 'mode_pooled' else CLASS_NAMES) \
+                    .aggregate_time("year", reducer) \
+                    .map(lambda img: img.setDefaultProjection('EPSG:4326', None, scale) \
+                         .reduceResolution(
+                    reducer=reducer,
+                    maxPixels=65535,
+                    bestEffort=True
+                ).reproject(crs='EPSG:4326', scale=scale))
+            else:  # mean_unpooled
+                ts = dw_chunk.aggregate_time("year", ee.Reducer.mean())
+                ts = ts.map(
+                    lambda image:
+                    image.select(CLASS_NAMES)
+                    .reduce(ee.Reducer.max())
+                    .eq(image.select(CLASS_NAMES))
+                    .multiply(ee.Image.constant(CLASS_NUMBER))
+                    .reduce(ee.Reducer.sum())
+                    .rename('label')
+                    .uint8()
+                    .copyProperties(image, ['system:time_start'])
+                )
 
-    elif processing_type in ['mode_pooled', 'mean_pooled']:
-        reducer = ee.Reducer.mode() if processing_type == 'mode_pooled' else ee.Reducer.mean()
-        ts = dw_filtered.select("label" if processing_type == 'mode_pooled' else CLASS_NAMES) \
-            .aggregate_time("year", reducer) \
-            .map(lambda img: img.setDefaultProjection('EPSG:4326', None, scale) \
-                 .reduceResolution(
-            reducer=reducer,
-            maxPixels=65535,
-            bestEffort=True
-        ).reproject(crs='EPSG:4326', scale=scale))
+            return ts.wx.to_xarray(region=chunk, scale=scale)
 
-    else:  # mean_unpooled
-        ts = dw_filtered.aggregate_time("year", ee.Reducer.mean())
-        ts = ts.map(
-            lambda image:
-            image.select(CLASS_NAMES)
-            .reduce(ee.Reducer.max())
-            .eq(image.select(CLASS_NAMES))
-            .multiply(ee.Image.constant(CLASS_NUMBER))
-            .reduce(ee.Reducer.sum())
-            .rename('label')
-            .uint8()
-            .copyProperties(image, ['system:time_start'])
-        )
+        except ee.EEException as e:
+            if attempt < retry_count - 1:
+                sleep(2 ** attempt)  # Exponential backoff
+                continue
+            if "Total request size" in str(e):
+                return None  # Signal need for smaller chunks
+            raise
+    return None
 
-    ds = ts.wx.to_xarray(region=aoi, scale=scale)
-    ds = ds.fillna(-1).clip(min=-128, max=127)
-    ds["label"] = ds["label"].astype("int8")
-    ds["x"] = ds["x"].astype("float32")
-    ds["y"] = ds["y"].astype("float32")
-    ds["time"] = ds["time"].dt.strftime("%Y-%m")
-    ds.to_netcdf(output_path)
+def process_dynamic_world(
+        aoi: ee.Geometry,
+        processing_type: str,
+        output_path: str,
+        scale: int = 30,
+        start_date: str = "2020-01-01",
+        end_date: str = "2021-01-01",
+        include_probabilities: bool = False
+) -> None:
+    """Process each band separately and merge at the end."""
+
+    def process_band(chunk: ee.Geometry, band: str, is_probability: bool) -> Optional[xr.Dataset]:
+        for attempt in range(3):
+            try:
+                dw_chunk = wxee.TimeSeries("GOOGLE/DYNAMICWORLD/V1") \
+                    .filterDate(start_date, end_date) \
+                    .filterBounds(chunk) \
+                    .map(lambda img: img.clip(chunk)) \
+                    .select(band)
+
+                # Always use mean for probabilities, mode/mean for label based on processing_type
+                reducer = ee.Reducer.mean() if is_probability else \
+                    (ee.Reducer.mode() if processing_type in ['mode', 'mode_pooled'] else ee.Reducer.mean())
+
+                ts = dw_chunk.aggregate_time("year", reducer)
+                if processing_type in ['mode_pooled', 'mean_pooled']:
+                    ts = ts.map(lambda img: img.setDefaultProjection('EPSG:4326', None, scale)
+                                .reduceResolution(
+                        reducer=ee.Reducer.mean() if is_probability else reducer,
+                        maxPixels=65535,
+                        bestEffort=True
+                    ).reproject(crs='EPSG:4326', scale=scale))
+
+                return ts.wx.to_xarray(region=chunk, scale=scale)
+            except ee.EEException as e:
+                if "Total request size" in str(e) and attempt < 2:
+                    sleep(2 ** attempt)
+                    continue
+                raise
+        return None
+
+    try:
+        CLASS_NAMES = ['water', 'trees', 'grass', 'flooded_vegetation', 'crops',
+                       'shrub_and_scrub', 'built', 'bare', 'snow_and_ice']
+
+        # Process each band separately
+        merged_ds = None
+
+        # Process label first
+        print("Processing label band")
+        try:
+            label_ds = process_band(aoi, 'label', is_probability=False)
+            merged_ds = label_ds
+        except ee.EEException:
+            print("Area too large for label, processing in chunks...")
+            chunks = chunk_geometry_adaptive(aoi)
+
+            for i, chunk in enumerate(chunks, 1):
+                print(f"Processing chunk {i}/{len(chunks)} for label...")
+                try:
+                    chunk_ds = process_band(chunk, 'label', is_probability=False)
+                    if chunk_ds is not None:
+                        merged_ds = chunk_ds if merged_ds is None else xr.merge([merged_ds, chunk_ds])
+                except Exception as e:
+                    print(f"Error processing chunk {i} for label: {str(e)}")
+                    continue
+
+        # Process probability bands if requested
+        if include_probabilities:
+            for band in CLASS_NAMES:
+                print(f"Processing probability band: {band}")
+                try:
+                    band_ds = process_band(aoi, band, is_probability=True)
+                    merged_ds = xr.merge([merged_ds, band_ds]) if merged_ds is not None else band_ds
+                except ee.EEException:
+                    print(f"Area too large for {band}, processing in chunks...")
+                    chunks = chunk_geometry_adaptive(aoi)
+
+                    for i, chunk in enumerate(chunks, 1):
+                        print(f"Processing chunk {i}/{len(chunks)} for {band}...")
+                        try:
+                            chunk_ds = process_band(chunk, band, is_probability=True)
+                            if chunk_ds is not None:
+                                merged_ds = xr.merge([merged_ds, chunk_ds])
+                        except Exception as e:
+                            print(f"Error processing chunk {i} for {band}: {str(e)}")
+                            continue
+
+        if merged_ds is None:
+            raise RuntimeError("Failed to process any data successfully")
+
+        # Post-processing
+        merged_ds = merged_ds.fillna(-1)
+        merged_ds["label"] = merged_ds["label"].clip(min=-128, max=127).astype("int8")
+
+        if include_probabilities:
+            for class_name in CLASS_NAMES:
+                if class_name in merged_ds:
+                    merged_ds[class_name] = merged_ds[class_name].clip(0, 1).astype("float32")
+
+        merged_ds["x"] = merged_ds["x"].astype("float32")
+        merged_ds["y"] = merged_ds["y"].astype("float32")
+        merged_ds["time"] = merged_ds["time"].dt.strftime("%Y-%m")
+
+        merged_ds.to_netcdf(output_path)
+
+    except Exception as e:
+        print(f"Error during processing: {str(e)}")
+        raise
+
+def visualize_areas(areas: Dict[str, ee.Geometry.Polygon],
+                    colors: Dict[str, Dict[str, str]] = None) -> geemap.Map:
+    """
+    Creates a map visualizing study areas with customizable colors
+
+    Args:
+        areas: Dictionary of area names and their geometries
+        colors: Dictionary of area styling. If None, uses default colors
+               Format: {'area_name': {'color': 'hex_color', 'fillColor': 'hex_color_with_alpha'}}
+    """
+    Map = geemap.Map(center=[-27, -62], zoom=6)
+
+    if colors is None:
+        colors = {name: {'color': 'FF0000', 'fillColor': 'FF000088'}
+                  for name in areas.keys()}
+
+    for area_name, area in areas.items():
+        style = colors.get(area_name, {'color': 'FF0000', 'fillColor': 'FF000088'})
+        Map.addLayer(area, style, area_name)
+
+    return Map
