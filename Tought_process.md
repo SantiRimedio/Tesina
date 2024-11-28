@@ -1,5 +1,35 @@
 # Registro de Decisiones del Proyecto
 
+
+
+## Fecha: [2024-27-11]
+### Tarea: Creo esquema de muestreo estratificado en `Mustreo_estratificado.ipynb`
+- **Estado de la tarea:**
+- [x] Establecer ecoregiones para la estratificación
+- [ ] Cruzar las ecoregiones con un índice espacial (H3 o s2)
+- [ ] Decidir si vamos a utilizar H3 o S2 como índice espacial
+- [ ] Decidir si vamos a hacer una diferenciación entre áreas puras y áreas fronterizas donde se encuentra más de una ecoregión.
+- [ ] Decidir si vamos a actualizar nuestra área de estudio. Hasta ahora era Argentina menos Patagonia. Podríamos decidir un criterio de ecoregiones en vez de político.
+
+- **Contexto:**
+En base a charlas con Germán decidimos que era necesario establecer un sistema de muestreo estratificado para validar DW de forma representativa sobre todo el territorio.
+La idea es estratificar por ecoregiones.
+
+- **Decisiones:**
+  - Utilizar la base de datos de [WWF](https://www.worldwildlife.org/publications/terrestrial-ecoregions-of-the-world) para las ecoregiones. [Paper correspondiente.](https://academic.oup.com/bioscience/article/51/11/933/227116)
+
+- **Alternativas:**
+  1. No busqué alternativas a WWF
+
+- **Razonamiento:**
+
+- **Implicaciones:**
+
+- **Notas de Germán:**
+
+- **Resultados:**
+
+
 ## Fecha: [2024-28-11]
 ### Tarea 1: Descarga de imágenes de casos de estudio específicos para establecer un workflow de validación.
 
