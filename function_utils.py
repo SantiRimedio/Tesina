@@ -5,6 +5,106 @@ import matplotlib.pyplot as plt
 from typing import Dict, Union, List, Tuple
 from pathlib import Path
 
+import numpy as np
+import xarray as xr
+from pathlib import Path
+from typing import List, Union, Tuple
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def compare_multiple_dw(
+        datasets: List[Union[str, Path, xr.Dataset]],
+        names: List[str],
+        data_var: str = 'label',
+        figsize: Tuple[int, int] = (8, 6),
+        title: str = ''
+) -> None:
+    """
+    Compares multiple Dynamic World maps, calculating accuracy between all pairs
+    using confusion matrices.
+
+    Parameters
+    ----------
+    datasets : List[Union[str, Path, xr.Dataset]]
+        List of Dynamic World datasets to compare
+    names : List[str]
+        Names to identify each dataset in the visualization
+    data_var : str
+        Name of the variable to compare in each dataset
+    figsize : Tuple[int, int]
+        Size of the figure
+    """
+    if len(datasets) != len(names):
+        raise ValueError("Number of datasets must match number of names")
+
+    # Dynamic World classes dictionary
+    dw_classes = {
+        0: 'Water',
+        1: 'Trees',
+        2: 'Grass',
+        3: 'Flooded vegetation',
+        4: 'Crops',
+        5: 'Shrub & scrub',
+        6: 'Built',
+        7: 'Bare',
+        8: 'Snow & ice'
+    }
+
+    # Load datasets
+    def load_dataset(ds):
+        if isinstance(ds, (str, Path)):
+            return xr.open_dataset(ds)
+        return ds
+
+    loaded_datasets = [load_dataset(ds) for ds in datasets]
+
+    # Create accuracy matrix
+    n_datasets = len(datasets)
+    accuracy_matrix = np.zeros((n_datasets, n_datasets))
+    labels = sorted(dw_classes.keys())
+
+    # Calculate accuracies using confusion matrices
+    for i in range(n_datasets):
+        for j in range(n_datasets):
+            if i != j:
+                # Create confusion matrix
+                conf_matrix = np.zeros((len(labels), len(labels)), dtype=int)
+
+                for k, label1 in enumerate(labels):
+                    for l, label2 in enumerate(labels):
+                        conf_matrix[k, l] = np.sum(
+                            (loaded_datasets[i][data_var].values == label1) &
+                            (loaded_datasets[j][data_var].values == label2)
+                        )
+
+                # Calculate overall accuracy from confusion matrix
+                accuracy = np.sum(np.diag(conf_matrix)) / np.sum(conf_matrix)
+                accuracy_matrix[i, j] = accuracy
+            else:
+                accuracy_matrix[i, j] = 1.0  # Diagonal elements
+
+    # Create visualization
+    plt.figure(figsize=figsize)
+    sns.heatmap(accuracy_matrix,
+                annot=True,
+                fmt='.2%',
+                xticklabels=names,
+                yticklabels=names,
+                cmap='YlOrRd',
+                vmin=0,
+                vmax=1)
+    plt.title(title)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+    # Print intermediate values for the last comparison
+    print("Valores intermedios compare_multiple:")
+    print(f"Suma diagonal: {np.sum(np.diag(conf_matrix))}")
+    print(f"Suma total matriz: {np.sum(conf_matrix)}")
+    print(f"Accuracy: {accuracy:.2%}")
+
 def compare_dw_maps(
         dataset1: Union[str, Path, xr.Dataset],
         dataset2: Union[str, Path, xr.Dataset],
@@ -280,6 +380,184 @@ def compare_dw_esa(
         'class_mapping_used': class_mapping
     }
 
+import numpy as np
+import xarray as xr
+from pathlib import Path
+from typing import List, Dict, Union, Tuple
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def compare_multiple_dw_esa(
+        dw_datasets: List[Union[str, Path, xr.Dataset]],
+        esa_dataset: Union[str, Path, xr.Dataset],
+        dw_names: List[str],
+        dw_var: str = 'label',
+        esa_var: str = 'Map',
+        custom_mapping: Dict[int, int] = None,
+        title: str = 'Dynamic World vs ESA Comparison',
+        figsize: Tuple[int, int] = (8, 6),
+        cmap: str = 'YlOrRd'
+) -> Dict:
+    """
+    Compares multiple Dynamic World maps against a single ESA map.
+
+    Parameters
+    ----------
+    dw_datasets : List[Union[str, Path, xr.Dataset]]
+        List of Dynamic World datasets to compare
+    esa_dataset : Union[str, Path, xr.Dataset]
+        ESA dataset to compare against
+    dw_names : List[str]
+        Names to identify each DW dataset
+    dw_var : str
+        Name of the variable in DW datasets
+    esa_var : str
+        Name of the variable in ESA dataset
+    custom_mapping : Dict[int, int], optional
+        Custom mapping of ESA -> DW classes
+    title : str
+        Title for the visualization
+    figsize : Tuple[int, int]
+        Size of the figure
+    cmap : str
+        Colormap for the heatmap
+
+    Returns
+    -------
+    Dict
+        Dictionary with accuracy matrix and detailed results per dataset
+    """
+    if len(dw_datasets) != len(dw_names):
+        raise ValueError("Number of datasets must match number of names")
+
+    # Class definitions
+    DW_CLASSES = {
+        0: 'Water',
+        1: 'Trees',
+        2: 'Grass',
+        3: 'Flooded vegetation',
+        4: 'Crops',
+        5: 'Shrub & scrub',
+        6: 'Built',
+        7: 'Bare',
+        8: 'Snow & ice'
+    }
+
+    ESA_CLASSES = {
+        10: 'Tree cover',
+        20: 'Shrubland',
+        30: 'Grassland',
+        40: 'Cropland',
+        50: 'Built-up',
+        60: 'Bare / sparse vegetation',
+        70: 'Snow and ice',
+        80: 'Permanent water bodies',
+        90: 'Herbaceous wetland',
+        95: 'Mangroves',
+        100: 'Moss and lichen'
+    }
+
+    # Default ESA -> DW mapping
+    DEFAULT_MAPPING = {
+        10: 1,    # Tree cover -> Trees
+        20: 5,    # Shrubland -> Shrub & scrub
+        30: 2,    # Grassland -> Grass
+        40: 4,    # Cropland -> Crops
+        50: 6,    # Built-up -> Built
+        60: 7,    # Bare/sparse -> Bare
+        70: 8,    # Snow and ice -> Snow & ice
+        80: 0,    # Water bodies -> Water
+        90: 3,    # Herbaceous wetland -> Flooded vegetation
+        95: 3,    # Mangroves -> Flooded vegetation
+        100: 2    # Moss and lichen -> Grass
+    }
+
+    class_mapping = custom_mapping if custom_mapping is not None else DEFAULT_MAPPING
+
+    # Load datasets
+    def load_dataset(ds):
+        if isinstance(ds, (str, Path)):
+            return xr.open_dataset(ds)
+        return ds
+
+    dw_loaded = [load_dataset(ds) for ds in dw_datasets]
+    esa_loaded = load_dataset(esa_dataset)
+
+    # Create mapped ESA array
+    esa_mapped = esa_loaded[esa_var].values.copy()
+    for esa_class, dw_class in class_mapping.items():
+        esa_mapped[esa_loaded[esa_var].values == esa_class] = dw_class
+
+    # Initialize results
+    n_datasets = len(dw_datasets)
+    accuracy_matrix = np.zeros(n_datasets)
+    detailed_results = []
+
+    # Calculate accuracies
+    for i in range(n_datasets):
+        # Verify shapes
+        if dw_loaded[i][dw_var].shape != esa_loaded[esa_var].shape:
+            raise ValueError(f"Dataset {dw_names[i]} shape {dw_loaded[i][dw_var].shape} "
+                             f"doesn't match ESA shape {esa_loaded[esa_var].shape}")
+
+        # Create confusion matrix
+        labels = sorted(set(DW_CLASSES.keys()))
+        conf_matrix = np.zeros((len(labels), len(labels)), dtype=int)
+
+        for j, label1 in enumerate(labels):
+            for k, label2 in enumerate(labels):
+                conf_matrix[j, k] = np.sum(
+                    (dw_loaded[i][dw_var].values == label1) & (esa_mapped == label2)
+                )
+
+        # Calculate metrics
+        overall_accuracy = np.sum(np.diag(conf_matrix)) / np.sum(conf_matrix)
+        accuracy_matrix[i] = overall_accuracy
+
+        # Calculate per-class accuracy
+        per_class_accuracy = {}
+        for j, label in enumerate(labels):
+            class_sum = np.sum(conf_matrix[j, :])
+            if class_sum > 0:
+                per_class_accuracy[label] = conf_matrix[j, j] / class_sum
+
+        detailed_results.append({
+            'name': dw_names[i],
+            'confusion_matrix': conf_matrix,
+            'overall_accuracy': overall_accuracy,
+            'per_class_accuracy': per_class_accuracy
+        })
+
+    # Create visualization
+    plt.figure(figsize=figsize)
+    sns.barplot(x=dw_names, y=accuracy_matrix)
+    plt.title(f'{title}')
+    plt.xlabel('Dynamic World Datasets')
+    plt.ylabel('Accuracy')
+    plt.xticks(rotation=45, ha='right')
+    plt.ylim(0, 1)
+    for i, v in enumerate(accuracy_matrix):
+        plt.text(i, v, f'{v:.2%}', ha='center', va='bottom')
+    plt.tight_layout()
+    plt.show()
+
+    # Print detailed results
+    for result in detailed_results:
+        print(f"\n=== {result['name']} ===")
+        print(f"Overall Accuracy: {result['overall_accuracy']:.2%}")
+        print("\nPer-class Accuracy:")
+        for label, acc in result['per_class_accuracy'].items():
+            print(f"{DW_CLASSES[label]}: {acc:.2%}")
+
+    return {
+        'accuracy_matrix': accuracy_matrix,
+        'detailed_results': detailed_results,
+        'dw_classes': DW_CLASSES,
+        'esa_classes': ESA_CLASSES,
+        'class_mapping_used': class_mapping
+    }
+
+
 
 import ee
 import geemap
@@ -512,15 +790,17 @@ def process_dynamic_world(
                     .map(lambda img: img.clip(chunk)) \
                     .select(band)
 
-                # Always use mean for probabilities, mode/mean for label based on processing_type
-                reducer = ee.Reducer.mean() if is_probability else \
-                    (ee.Reducer.mode() if processing_type in ['mode', 'mode_pooled'] else ee.Reducer.mean())
+                # Remove fill values
+                dw_chunk = dw_chunk.map(lambda img: img.updateMask(img.neq(-32768)))
+
+                # Always use mean for probabilities, mode for label (only in mode cases)
+                reducer = ee.Reducer.mean() if is_probability else ee.Reducer.mode()
 
                 ts = dw_chunk.aggregate_time("year", reducer)
                 if processing_type in ['mode_pooled', 'mean_pooled']:
                     ts = ts.map(lambda img: img.setDefaultProjection('EPSG:4326', None, scale)
                                 .reduceResolution(
-                        reducer=ee.Reducer.mean() if is_probability else reducer,
+                        reducer=ee.Reducer.mean(),  # Always mean for spatial reduction
                         maxPixels=65535,
                         bestEffort=True
                     ).reproject(crs='EPSG:4326', scale=scale))
@@ -537,29 +817,30 @@ def process_dynamic_world(
         CLASS_NAMES = ['water', 'trees', 'grass', 'flooded_vegetation', 'crops',
                        'shrub_and_scrub', 'built', 'bare', 'snow_and_ice']
 
-        # Process each band separately
         merged_ds = None
 
-        # Process label first
-        print("Processing label band")
-        try:
-            label_ds = process_band(aoi, 'label', is_probability=False)
-            merged_ds = label_ds
-        except ee.EEException:
-            print("Area too large for label, processing in chunks...")
-            chunks = chunk_geometry_adaptive(aoi)
+        # Only process label for mode-based methods
+        if 'mode' in processing_type:
+            print("Processing label band")
+            try:
+                label_ds = process_band(aoi, 'label', is_probability=False)
+                merged_ds = label_ds
+            except ee.EEException:
+                print("Area too large for label, processing in chunks...")
+                chunks = chunk_geometry_adaptive(aoi)
 
-            for i, chunk in enumerate(chunks, 1):
-                print(f"Processing chunk {i}/{len(chunks)} for label...")
-                try:
-                    chunk_ds = process_band(chunk, 'label', is_probability=False)
-                    if chunk_ds is not None:
-                        merged_ds = chunk_ds if merged_ds is None else xr.merge([merged_ds, chunk_ds])
-                except Exception as e:
-                    print(f"Error processing chunk {i} for label: {str(e)}")
-                    continue
+                for i, chunk in enumerate(chunks, 1):
+                    print(f"Processing chunk {i}/{len(chunks)} for label...")
+                    try:
+                        chunk_ds = process_band(chunk, 'label', is_probability=False)
+                        if chunk_ds is not None:
+                            merged_ds = chunk_ds if merged_ds is None else xr.merge([merged_ds, chunk_ds])
+                    except Exception as e:
+                        print(f"Error processing chunk {i} for label: {str(e)}")
+                        continue
 
-        # Process probability bands if requested
+        # Process probability bands
+        include_probabilities = include_probabilities or 'mean' in processing_type
         if include_probabilities:
             for band in CLASS_NAMES:
                 print(f"Processing probability band: {band}")
@@ -585,6 +866,16 @@ def process_dynamic_world(
 
         # Post-processing
         merged_ds = merged_ds.fillna(-1)
+
+        # Calculate label from probability bands for mean-based methods
+        if 'mean' in processing_type:
+            # Stack all probability bands
+            prob_array = np.stack([merged_ds[class_name].values for class_name in CLASS_NAMES], axis=-1)
+            # Get argmax along class dimension
+            label_array = np.argmax(prob_array, axis=-1)
+            # Add label to dataset
+            merged_ds['label'] = (('time', 'y', 'x'), label_array)
+
         merged_ds["label"] = merged_ds["label"].clip(min=-128, max=127).astype("int8")
 
         if include_probabilities:
